@@ -24,10 +24,13 @@ import org.apache.http.Header;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.CookieStore;
 import org.apache.http.impl.client.BasicCookieStore;
-import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.util.EntityUtils;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
+import org.testng.annotations.Factory;
 import org.testng.annotations.Test;
 import org.wso2.carbon.automation.engine.context.AutomationContext;
 import org.wso2.carbon.automation.engine.context.TestUserMode;
@@ -46,12 +49,9 @@ import org.wso2.identity.integration.common.clients.Idp.IdentityProviderMgtServi
 import org.wso2.identity.integration.common.clients.application.mgt.ApplicationManagementServiceClient;
 import org.wso2.identity.integration.common.clients.oauth.OauthAdminClient;
 import org.wso2.identity.integration.common.clients.sso.saml.SAMLSSOConfigServiceClient;
-import org.wso2.identity.integration.common.utils.CarbonTestServerManager;
 import org.wso2.identity.integration.test.base.TestDataHolder;
-import org.wso2.identity.integration.test.utils.CommonConstants;
 import org.wso2.identity.integration.test.utils.IdentityConstants;
 
-import java.util.HashMap;
 import java.util.Map;
 
 import static org.testng.Assert.assertTrue;
@@ -67,7 +67,6 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     private static final String IDENTITY_PROVIDER_ALIAS =
             "https://localhost:" + IS_DEFAULT_HTTPS_PORT + "/oauth2/token/";
     private static final String SECONDARY_IS_SAMLSSO_URL = "https://localhost:9854/samlsso";
-    private static final int PORT_OFFSET_1 = 1;
     private static final String SAML_NAME_ID_FORMAT = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
     private static final String PRIMARY_IS_APPLICATION_NAME = "testOauthApp";
     private static final String SECONDARY_IS_APPLICATION_NAME = "testSAMLApp";
@@ -79,26 +78,46 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     private IdentityProviderMgtServiceClient identityProviderMgtServiceClient;
     private MultipleServersManager manager;
     private SAMLSSOConfigServiceClient samlSSOConfigServiceClient;
-    private DefaultHttpClient client;
+    private CloseableHttpClient client;
     private ServiceProvider serviceProvider;
     private HttpResponse response;
     private CookieStore cookieStore;
     private TestDataHolder testDataHolder;
+    private final String username;
+    private final String userPassword;
+    private final AutomationContext context;
+    private String backendURL;
+    private String sessionCookie;
 
     private String initialCarbonHome;
 
+    @DataProvider(name = "configProvider")
+    public static Object[][] configProvider() {
+
+        return new Object[][]{{TestUserMode.SUPER_TENANT_ADMIN}};
+    }
+
+    @Factory(dataProvider = "configProvider")
+    public ConditionalAuthenticationTestCase(TestUserMode userMode) throws Exception {
+
+        context = new AutomationContext("IDENTITY", userMode);
+        this.username = context.getContextTenant().getTenantAdmin().getUserName();
+        this.userPassword = context.getContextTenant().getTenantAdmin().getPassword();
+    }
 
     @BeforeClass(alwaysRun = true)
     public void testInit() throws Exception {
 
         super.init();
+        backendURL = context.getContextUrls().getBackEndUrl();
+        log.info("Back-end url : " + backendURL);
+        logManger = new AuthenticatorClient(backendURL);
+        sessionCookie = logManger.login(username, userPassword, context.getInstance().getHosts().get("default"));
+        log.info("Host : " + context.getInstance().getHosts().get("default"));
         testDataHolder = TestDataHolder.getInstance();
         initialCarbonHome = System.getProperty("carbon.home");
         logManger = new AuthenticatorClient(backendURL);
-        String cookie = this.logManger.login(isServer.getSuperTenant().getTenantAdmin().getUserName(),
-                isServer.getSuperTenant().getTenantAdmin().getPassword(),
-                isServer.getInstance().getHosts().get("default"));
-        oauthAdminClient = new OauthAdminClient(backendURL, cookie);
+        oauthAdminClient = new OauthAdminClient(backendURL, sessionCookie);
         ConfigurationContext configContext = ConfigurationContextFactory
                 .createConfigurationContextFromFileSystem(null, null);
         applicationManagementServiceClient = new ApplicationManagementServiceClient(sessionCookie, backendURL,
@@ -106,9 +125,8 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
         identityProviderMgtServiceClient = new IdentityProviderMgtServiceClient(sessionCookie, backendURL);
         manager = testDataHolder.getManager();
 
-        client = new DefaultHttpClient();
         cookieStore = new BasicCookieStore();
-        client.setCookieStore(cookieStore);
+        client = HttpClientBuilder.create().setDefaultCookieStore(cookieStore).build();
 
         startSecondaryIS();
         String script = getConditionalAuthScript("ConditionalAuthenticationTestCase.js");
@@ -149,6 +167,9 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     public void testConditionalAuthentication() throws Exception {
 
         updateAuthScript("ConditionalAuthenticationTestCase.js");
+        log.info("Conditional Authentication userName: " + userInfo.getUserName());
+        log.info("Conditional Authentication userPassword: " + userInfo.getPassword());
+        log.info("Conditional Authentication userDomain: " + userInfo.getUserDomain());
         response = loginWithOIDC(PRIMARY_IS_APPLICATION_NAME, consumerKey, client);
         /* Here if the client is redirected to the secondary IS, it indicates that the conditional authentication steps
          has been successfully completed. */
@@ -396,9 +417,16 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     private void startSecondaryIS() throws Exception {
 
         AutomationContext context = testDataHolder.getAutomationContext();
-        String serviceUrl = (context.getContextUrls().getSecureServiceUrl())
-                .replace("9853", String.valueOf(IS_DEFAULT_HTTPS_PORT + PORT_OFFSET_1)) + "/";
 
+        String serviceUrl = context.getContextUrls().getSecureServiceUrl() + "/";
+        log.info("Service url for secondary IS: " + serviceUrl);
+
+        log.info("Number of ports for secondary IS: " + context.getInstance().getPorts().size());
+        for (Map.Entry<String, String> entry : context.getInstance().getPorts().entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            log.info("port name: " + key + ", value: " + value);
+        }
         AuthenticatorClient authenticatorClient = new AuthenticatorClient(serviceUrl);
 
         sessionCookie = authenticatorClient.login(context.getSuperTenant().getTenantAdmin().getUserName(),

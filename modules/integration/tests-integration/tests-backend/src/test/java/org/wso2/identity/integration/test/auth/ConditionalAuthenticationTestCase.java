@@ -22,10 +22,13 @@ import org.apache.axis2.context.ConfigurationContext;
 import org.apache.axis2.context.ConfigurationContextFactory;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
+import org.apache.http.NameValuePair;
 import org.apache.http.client.CookieStore;
+import org.apache.http.client.HttpClient;
 import org.apache.http.impl.client.BasicCookieStore;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.util.EntityUtils;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -34,6 +37,7 @@ import org.testng.annotations.Factory;
 import org.testng.annotations.Test;
 import org.wso2.carbon.automation.engine.context.AutomationContext;
 import org.wso2.carbon.automation.engine.context.TestUserMode;
+import org.wso2.carbon.automation.engine.context.beans.User;
 import org.wso2.carbon.automation.extensions.servers.carbonserver.MultipleServersManager;
 import org.wso2.carbon.identity.application.common.model.idp.xsd.FederatedAuthenticatorConfig;
 import org.wso2.carbon.identity.application.common.model.idp.xsd.IdentityProvider;
@@ -51,8 +55,11 @@ import org.wso2.identity.integration.common.clients.oauth.OauthAdminClient;
 import org.wso2.identity.integration.common.clients.sso.saml.SAMLSSOConfigServiceClient;
 import org.wso2.identity.integration.test.base.TestDataHolder;
 import org.wso2.identity.integration.test.utils.IdentityConstants;
+import org.wso2.identity.integration.test.utils.OAuth2Constant;
 
-import java.util.Map;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.testng.Assert.assertTrue;
 import static org.wso2.identity.integration.test.utils.CommonConstants.IS_DEFAULT_HTTPS_PORT;
@@ -67,6 +74,7 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     private static final String IDENTITY_PROVIDER_ALIAS =
             "https://localhost:" + IS_DEFAULT_HTTPS_PORT + "/oauth2/token/";
     private static final String SECONDARY_IS_SAMLSSO_URL = "https://localhost:9854/samlsso";
+    private static final int PORT_OFFSET_1 = 1;
     private static final String SAML_NAME_ID_FORMAT = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
     private static final String PRIMARY_IS_APPLICATION_NAME = "testOauthApp";
     private static final String SECONDARY_IS_APPLICATION_NAME = "testSAMLApp";
@@ -88,7 +96,7 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     private final AutomationContext context;
     private String backendURL;
     private String sessionCookie;
-
+    private User userInfo;
     private String initialCarbonHome;
 
     @DataProvider(name = "configProvider")
@@ -110,10 +118,9 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
 
         super.init();
         backendURL = context.getContextUrls().getBackEndUrl();
-        log.info("Back-end url : " + backendURL);
         logManger = new AuthenticatorClient(backendURL);
+        userInfo = context.getSuperTenant().getTenantAdmin();
         sessionCookie = logManger.login(username, userPassword, context.getInstance().getHosts().get("default"));
-        log.info("Host : " + context.getInstance().getHosts().get("default"));
         testDataHolder = TestDataHolder.getInstance();
         initialCarbonHome = System.getProperty("carbon.home");
         logManger = new AuthenticatorClient(backendURL);
@@ -167,10 +174,7 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     public void testConditionalAuthentication() throws Exception {
 
         updateAuthScript("ConditionalAuthenticationTestCase.js");
-        log.info("Conditional Authentication userName: " + userInfo.getUserName());
-        log.info("Conditional Authentication userPassword: " + userInfo.getPassword());
-        log.info("Conditional Authentication userDomain: " + userInfo.getUserDomain());
-        response = loginWithOIDC(PRIMARY_IS_APPLICATION_NAME, consumerKey, client);
+        response = loginWithOIDC(PRIMARY_IS_APPLICATION_NAME, consumerKey, client, userInfo);
         /* Here if the client is redirected to the secondary IS, it indicates that the conditional authentication steps
          has been successfully completed. */
         String locationHeader = response.getFirstHeader("location").getValue();
@@ -187,7 +191,7 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
 
         // Update authentication script to handle authentication based on HTTP context.
         updateAuthScript("ConditionalAuthenticationHTTPCookieTestCase.js");
-        response = loginWithOIDC(PRIMARY_IS_APPLICATION_NAME, consumerKey, client);
+        response = loginWithOIDC(PRIMARY_IS_APPLICATION_NAME, consumerKey, client, userInfo);
 
         /* Here if the response headers contains the custom HTTP cookie we set from the authentication script, it
         indicates that the conditional authentication steps has been successfully completed. */
@@ -417,16 +421,9 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
     private void startSecondaryIS() throws Exception {
 
         AutomationContext context = testDataHolder.getAutomationContext();
+        String serviceUrl = (context.getContextUrls().getSecureServiceUrl())
+                .replace("9853", String.valueOf(IS_DEFAULT_HTTPS_PORT + PORT_OFFSET_1)) + "/";
 
-        String serviceUrl = context.getContextUrls().getSecureServiceUrl() + "/";
-        log.info("Service url for secondary IS: " + serviceUrl);
-
-        log.info("Number of ports for secondary IS: " + context.getInstance().getPorts().size());
-        for (Map.Entry<String, String> entry : context.getInstance().getPorts().entrySet()) {
-            String key = entry.getKey();
-            String value = entry.getValue();
-            log.info("port name: " + key + ", value: " + value);
-        }
         AuthenticatorClient authenticatorClient = new AuthenticatorClient(serviceUrl);
 
         sessionCookie = authenticatorClient.login(context.getSuperTenant().getTenantAdmin().getUserName(),
@@ -518,5 +515,23 @@ public class ConditionalAuthenticationTestCase extends AbstractAdaptiveAuthentic
         localAndOutboundAuthenticationConfig.addAuthenticationSteps(authenticationStep2);
 
         return localAndOutboundAuthenticationConfig;
+    }
+
+    private HttpResponse sendLoginPost(HttpClient client, String sessionDataKey, User user) throws IOException {
+
+        List<NameValuePair> urlParameters = new ArrayList<>();
+        urlParameters.add(new BasicNameValuePair("username", user.getUserName()));
+        urlParameters.add(new BasicNameValuePair("password", user.getPassword()));
+        urlParameters.add(new BasicNameValuePair("sessionDataKey", sessionDataKey));
+        log.info("sendLoginPost:sessionDataKey: " + sessionDataKey);
+        HttpResponse response = sendPostRequestWithParameters(client, urlParameters, OAuth2Constant.COMMON_AUTH_URL);
+
+        return response;
+    }
+
+    protected HttpResponse loginWithOIDC(String appName, String consumerKey, HttpClient client, User user) throws Exception {
+
+        String sessionDataKey = redirectToLoginPage(appName, consumerKey, client, "sessionDataKey");
+        return sendLoginPost(client, sessionDataKey, user);
     }
 }

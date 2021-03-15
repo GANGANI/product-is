@@ -92,6 +92,12 @@ public abstract class UserMgtServiceAbstractTestCase extends ISIntegrationTest {
 
         userMgtClient.addRole("umRole2", null, new String[]{"login"}, false);
         Assert.assertTrue(nameExists(userMgtClient.listRoles("umRole2", 100), "umRole2"), "Adding a user role has failed");
+        try {
+            userMgtClient.addRole("UMROLE2", null, new String[]{"login"}, false);
+        } catch (UserAdminUserAdminException e) {
+            Assert.assertFalse(nameExists(userMgtClient.listRoles("UMROLE2", 100), "UMROLE2"),
+                    "Incorrectly added UMROLE2 while umRole2 exists");
+        }
     }
 
     public void testDeleteRole() throws Exception {
@@ -214,6 +220,13 @@ public abstract class UserMgtServiceAbstractTestCase extends ISIntegrationTest {
 
         Assert.assertFalse(nameExists(userMgtClient.getAllRolesNames("umRole7", 10), "umRole7"), "Role umRole7 update failed.");
         Assert.assertTrue(nameExists(userMgtClient.getAllRolesNames("umRole7_1", 10), "umRole7_1"), "Updating role umRole7 to umRole7_1 has failed.");
+
+        // Test case sensitive role name update.
+        userMgtClient.updateRoleName("umRole7_1", "UMROLE7_1");
+        Assert.assertTrue(nameExists(userMgtClient.getAllRolesNames("UMROLE7_1", 10),
+                    "UMROLE7_1"), "Updating role umRole7_1 to UMROLE7_1 has failed.");
+        Assert.assertFalse(nameExists(userMgtClient.getAllRolesNames("umRole7_1", 10), "umRole7_1"),
+                "Role umRole7_1 update failed.");
 
         userMgtClient.deleteRole("umRole7_1");
         loginManger.logOut();
